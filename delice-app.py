@@ -159,7 +159,7 @@ with tab_m:
                 with st.expander(f"**{rec['nom']}**"):
                     st.write(rec['instructions'])
                     if st.button(f"🔄 Remplacer cette recette", key=f"swap_{i}"):
-                    remplacer_une_recette(i, opt)
+                       remplacer_une_recette(i, opt)
         with c_c:
             st.subheader("🛒 Courses")
             crs = calculer_courses(st.session_state["menu_actuel"], nb_p)
