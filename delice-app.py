@@ -1,5 +1,7 @@
 import streamlit as st
 import random
+import json
+import urllib.parse
 from typing import List, Dict, Any
 from supabase import create_client, Client
 import google.generativeai as genai
@@ -105,27 +107,26 @@ def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str,
     return liste_courses
 
 def estimer_budget_ia(courses: Dict[str, Dict[str, Dict[str, Any]]]) -> str:
-    """Demande à l'IA d'estimer le prix total de la liste de courses."""
-    if not courses:
-        return "0€ (Rien à acheter !)"
-        
-    # On transforme le dictionnaire compliqué en un texte simple pour l'IA
+    if not courses: return "0€ (Rien à acheter !)"
     liste_texte = ""
-    for rayon, ingredients in courses.items():
-        for nom, data in ingredients.items():
-            liste_texte += f"- {data['quantite']} {data['unite']} de {nom}\n"
+    for r, ings in courses.items():
+        for n, d in ings.items():
+            liste_texte += f"- {d['quantite']} {d['unite']} de {n}\n"
+    prompt = f"Tu es un expert en budget de courses en France. Voici une liste : {liste_texte}. Donne-moi UNIQUEMENT une fourchette de prix estimée en euros (ex: 45€ - 55€). Ne justifie pas."
+    try: return model.generate_content(prompt).text.strip()
+    except: return "Estimation indisponible"
 
-    prompt = f"""
-    Tu es un expert en budget de courses en France.
-    Voici une liste de courses :
-    {liste_texte}
-    Donne-moi UNIQUEMENT une fourchette de prix estimée en euros (ex: 45€ - 55€). Ne justifie pas ton calcul, donne juste la fourchette.
-    """
-    try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        return "Estimation indisponible"
+def formatter_courses_texte(courses: Dict[str, Dict[str, Dict[str, Any]]]) -> str:
+    """Transforme le dictionnaire de courses en un texte propre pour l'export."""
+    if not courses: return "Rien à acheter cette semaine ! 🎉"
+    texte = "🛒 *Liste de Courses Délice-App* 🍲\n\n"
+    for rayon, ingredients in courses.items():
+        texte += f"📍 *{rayon}*\n"
+        for nom, data in ingredients.items():
+            qte = int(data['quantite']) if data['quantite'].is_integer() else round(data['quantite'], 2)
+            texte += f"☐ {nom} : {qte} {data['unite']}\n"
+        texte += "\n"
+    return texte
 
 # ==========================================
 # 4. INTERFACE UTILISATEUR (GUI)
@@ -163,6 +164,7 @@ with onglet_menu:
             if not courses:
                 st.success("🎉 Vous avez déjà tout ce qu'il faut dans votre frigo !")
             else:
+                # Affichage interactif
                 for rayon, ingredients in courses.items():
                     st.write(f"**{rayon}**")
                     for nom, data in ingredients.items():
@@ -170,9 +172,23 @@ with onglet_menu:
                         st.checkbox(f"{nom} : {qte} {data['unite']}", key=f"shop_{nom}")
                 
                 st.divider()
-                # --- LE NOUVEAU BOUTON D'ESTIMATION ---
-                if st.button("💰 Estimer le budget des courses", use_container_width=True):
-                    with st.spinner("L'IA calcule le montant de votre caddie..."):
+                
+                # --- NOUVEAU : ZONE D'EXPORT ---
+                st.subheader("📤 Exporter")
+                texte_export = formatter_courses_texte(courses)
+                
+                # 1. Zone de texte rapide à copier
+                st.text_area("Copiez ce texte pour vos notes :", value=texte_export, height=150)
+                
+                # 2. Bouton WhatsApp natif
+                texte_encode = urllib.parse.quote(texte_export)
+                lien_wa = f"https://wa.me/?text={texte_encode}"
+                st.markdown(f'<a href="{lien_wa}" target="_blank" style="display: inline-block; padding: 0.5em 1em; color: white; background-color: #25D366; border-radius: 5px; text-decoration: none; font-weight: bold;">📱 Partager sur WhatsApp</a>', unsafe_allow_html=True)
+                
+                st.divider()
+                # Estimation budget
+                if st.button("💰 Estimer le budget", use_container_width=True):
+                    with st.spinner("Calcul en cours..."):
                         estimation = estimer_budget_ia(courses)
                         st.info(f"**Budget estimé : {estimation}**")
     else:
@@ -180,7 +196,6 @@ with onglet_menu:
 
 with onglet_frigo:
     st.subheader("🧊 Inventaire de vos réserves")
-    
     with st.expander("➕ Ajouter ou modifier un article", expanded=True):
         res_tous_ing = supabase.table("ingredients").select("id, nom").execute()
         dict_ing = {i["nom"].capitalize(): i["id"] for i in res_tous_ing.data} if res_tous_ing.data else {}
@@ -194,14 +209,12 @@ with onglet_frigo:
             st.rerun()
 
     st.divider()
-    
     stocks = get_stock_frigo_complet()
     if stocks:
         for item in stocks:
             nom_item = item["ingredients"]["nom"].capitalize()
             id_ing = item["ingredient_id"]
             qte_item = item["quantite"]
-            
             col_n, col_q, col_b = st.columns([3, 1, 1])
             col_n.write(f"**{nom_item}**")
             col_q.write(f"{qte_item}")
