@@ -1,6 +1,4 @@
 import streamlit as st
-import json
-import os
 import random
 from typing import List, Dict, Any
 from supabase import create_client, Client
@@ -10,7 +8,6 @@ import google.generativeai as genai
 # 1. CONFIGURATION
 # ==========================================
 st.set_page_config(page_title="Délice-App", page_icon="🍲", layout="wide")
-LOCAL_SAVE_FILE = "data.json"
 
 @st.cache_resource
 def init_connection() -> Client:
@@ -21,20 +18,33 @@ genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 # ==========================================
-# 2. PERSISTANCE LOCALE
+# 2. PERSISTANCE CLOUD (SUPABASE)
 # ==========================================
-def save_menu_local(menu_data: List[Dict[str, Any]]) -> None:
-    with open(LOCAL_SAVE_FILE, "w", encoding="utf-8") as f:
-        json.dump(menu_data, f, ensure_ascii=False, indent=4)
+def save_menu_supabase(menu_data: List[Dict[str, Any]]) -> None:
+    """Sauvegarde le menu directement dans la base de données (Remplace data.json)."""
+    # 1. On vide l'ancien menu
+    anciens = supabase.table("menu_en_cours").select("id").execute()
+    for row in anciens.data:
+        supabase.table("menu_en_cours").delete().eq("id", row["id"]).execute()
+        
+    # 2. On insère le nouveau menu
+    inserts = [{"recette_id": r["id"]} for r in menu_data]
+    if inserts:
+        supabase.table("menu_en_cours").insert(inserts).execute()
 
-def load_menu_local() -> List[Dict[str, Any]]:
-    if os.path.exists(LOCAL_SAVE_FILE):
-        with open(LOCAL_SAVE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+def load_menu_supabase() -> List[Dict[str, Any]]:
+    """Charge le menu depuis la base de données au lancement."""
+    # Requête relationnelle pour récupérer les détails des recettes sauvegardées
+    res = supabase.table("menu_en_cours").select(
+        "recettes(id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon)))"
+    ).execute()
+    
+    # On reformate proprement les données
+    return [item["recettes"] for item in res.data if item.get("recettes")]
 
+# Initialisation de la mémoire avec la base de données
 if "menu_actuel" not in st.session_state:
-    st.session_state["menu_actuel"] = load_menu_local()
+    st.session_state["menu_actuel"] = load_menu_supabase()
 if "theme_actuel" not in st.session_state:
     st.session_state["theme_actuel"] = "Classique"
 
@@ -42,7 +52,6 @@ if "theme_actuel" not in st.session_state:
 # 3. LOGIQUE MÉTIER & IA
 # ==========================================
 def inventer_recette_ia(theme: str, options: List[str]) -> None:
-    """L'IA invente une recette basée sur le thème ET les options."""
     options_str = ", ".join(options) if options else "Aucune restriction"
     
     prompt = f"""
@@ -60,7 +69,7 @@ def inventer_recette_ia(theme: str, options: List[str]) -> None:
     }}
     """
     
-    with st.spinner(f"🧠 L'IA invente une recette {theme} (Options: {options_str})..."):
+    with st.spinner(f"🧠 L'IA invente une recette {theme}..."):
         try:
             response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
             recette_ia = json.loads(response.text)
@@ -82,31 +91,28 @@ def inventer_recette_ia(theme: str, options: List[str]) -> None:
             st.success(f"✨ Nouvelle recette mémorisée : {recette_ia['nom']} !")
             return True
         except Exception as e:
-            st.error("L'IA a eu un petit problème de créativité. Réessayez !")
+            st.error("L'IA a eu un petit problème. Réessayez !")
             return False
 
 def generer_menu(theme: str, nb_repas: int, options: List[str]) -> None:
-    """Récupère ou crée des recettes pour remplir le nombre de repas demandé."""
     st.session_state["theme_actuel"] = theme
     response = supabase.table("recettes").select(
-        "nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))"
+        "id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))"
     ).eq("theme", theme).execute()
     
     recettes_dispo = response.data
     
-    # Si on n'a pas assez de recettes dans la base pour le nombre de repas demandé
     if len(recettes_dispo) < nb_repas:
         if inventer_recette_ia(theme, options):
-            generer_menu(theme, nb_repas, options) # On relance après création
+            generer_menu(theme, nb_repas, options)
         return
 
     menu_genere = random.sample(recettes_dispo, min(len(recettes_dispo), nb_repas))
     st.session_state["menu_actuel"] = menu_genere
-    save_menu_local(menu_genere)
+    save_menu_supabase(menu_genere) # Sauvegarde dans le Cloud !
     st.rerun()
 
 def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Additionne les ingrédients et multiplie par le nombre de personnes."""
     liste_courses: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for recette in menu:
         for lien in recette.get("recette_ingredients", []):
@@ -114,7 +120,6 @@ def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str,
             nom_ing = ing_data.get("nom", "Inconnu").capitalize()
             rayon = ing_data.get("rayon", "Autre")
             
-            # Multiplication par le nombre de personnes
             quantite = float(lien.get("quantite", 0)) * nb_personnes
             unite = lien.get("unite", "")
 
@@ -126,7 +131,6 @@ def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str,
 # ==========================================
 # 4. INTERFACE UTILISATEUR (GUI)
 # ==========================================
-# --- BARRE LATÉRALE (PARAMÈTRES) ---
 with st.sidebar:
     st.header("⚙️ Paramètres")
     nb_personnes = st.number_input("👥 Nombre de personnes", min_value=1, max_value=20, value=2)
@@ -134,26 +138,17 @@ with st.sidebar:
     options_diet = st.multiselect("🥗 Options diététiques", ["Léger", "Hyperprotéiné", "Végétarien", "Sans Gluten", "Économique"])
     
     st.divider()
-    
     st.header("🎨 Thème")
-    # On récupère les thèmes existants de la base
     res_themes = supabase.table("recettes").select("theme").execute()
     themes_existants = list(set([r["theme"] for r in res_themes.data])) if res_themes.data else ["Classique"]
     
-    choix_theme = st.selectbox("Choisissez un thème existant", themes_existants + ["+ Créer un nouveau thème..."])
-    
-    if choix_theme == "+ Créer un nouveau thème...":
-        theme_final = st.text_input("Nom du nouveau thème (ex: Mexicain, Brunch...)")
-    else:
-        theme_final = choix_theme
+    choix_theme = st.selectbox("Choisissez un thème", themes_existants + ["+ Créer un nouveau thème..."])
+    theme_final = st.text_input("Nom du nouveau thème") if choix_theme == "+ Créer un nouveau thème..." else choix_theme
 
     if st.button("🚀 Générer la Semaine", use_container_width=True, type="primary"):
-        if theme_final:
-            generer_menu(theme_final, nb_repas, options_diet)
-        else:
-            st.warning("Veuillez définir un thème.")
+        if theme_final: generer_menu(theme_final, nb_repas, options_diet)
+        else: st.warning("Veuillez définir un thème.")
 
-# --- ZONE PRINCIPALE ---
 st.title("🍲 DÉLICE-APP")
 
 if st.session_state["menu_actuel"]:
@@ -161,11 +156,9 @@ if st.session_state["menu_actuel"]:
 
     with col_menu:
         st.subheader(f"🍽️ Menu {st.session_state['theme_actuel']}")
-        
-        # Bouton pour forcer l'IA à inventer une NOUVELLE recette dans ce thème
         if st.button("✨ L'IA invente une nouvelle recette pour ce thème"):
-            inventer_recette_ia(st.session_state["theme_actuel"], options_diet)
-            generer_menu(st.session_state["theme_actuel"], nb_repas, options_diet)
+            if inventer_recette_ia(st.session_state["theme_actuel"], options_diet):
+                generer_menu(st.session_state["theme_actuel"], nb_repas, options_diet)
             
         for recette in st.session_state["menu_actuel"]:
             with st.expander(f"**{recette['nom']}**"):
@@ -176,12 +169,10 @@ if st.session_state["menu_actuel"]:
         st.caption(f"Calculé pour {nb_personnes} personne(s)")
         courses = calculer_courses(st.session_state["menu_actuel"], nb_personnes)
         
-        # Affichage avec cases à cocher
         for rayon, ingredients in courses.items():
             st.markdown(f"**📍 {rayon}**")
             for nom, data in ingredients.items():
                 qte_propre = int(data['quantite']) if data['quantite'].is_integer() else round(data['quantite'], 2)
-                # st.checkbox crée une case à cocher interactive
                 st.checkbox(f"{nom} : {qte_propre} {data['unite']}")
 else:
     st.info("👈 Utilisez la barre latérale pour configurer et générer vos repas !")
