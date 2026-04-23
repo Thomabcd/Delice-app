@@ -81,12 +81,10 @@ def generer_menu(theme: str, nb_repas: int, options: List[str]) -> None:
     st.rerun()
 
 def get_stock_frigo_complet() -> List[Dict[str, Any]]:
-    """Récupère les stocks avec les IDs pour pouvoir supprimer."""
     res = supabase.table("frigo").select("quantite, ingredient_id, ingredients(nom)").execute()
     return res.data if res.data else []
 
 def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    # On récupère le stock pour la soustraction
     res_stock = get_stock_frigo_complet()
     stock_frigo = {item["ingredients"]["nom"].capitalize(): float(item["quantite"]) for item in res_stock}
     
@@ -105,6 +103,29 @@ def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str,
                 if nom_ing not in liste_courses[rayon]: liste_courses[rayon][nom_ing] = {"quantite": 0.0, "unite": unite}
                 liste_courses[rayon][nom_ing]["quantite"] += quantite_a_acheter
     return liste_courses
+
+def estimer_budget_ia(courses: Dict[str, Dict[str, Dict[str, Any]]]) -> str:
+    """Demande à l'IA d'estimer le prix total de la liste de courses."""
+    if not courses:
+        return "0€ (Rien à acheter !)"
+        
+    # On transforme le dictionnaire compliqué en un texte simple pour l'IA
+    liste_texte = ""
+    for rayon, ingredients in courses.items():
+        for nom, data in ingredients.items():
+            liste_texte += f"- {data['quantite']} {data['unite']} de {nom}\n"
+
+    prompt = f"""
+    Tu es un expert en budget de courses en France.
+    Voici une liste de courses :
+    {liste_texte}
+    Donne-moi UNIQUEMENT une fourchette de prix estimée en euros (ex: 45€ - 55€). Ne justifie pas ton calcul, donne juste la fourchette.
+    """
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        return "Estimation indisponible"
 
 # ==========================================
 # 4. INTERFACE UTILISATEUR (GUI)
@@ -138,18 +159,28 @@ with onglet_menu:
         with col_c:
             st.subheader("🛒 Courses")
             courses = calculer_courses(st.session_state["menu_actuel"], nb_personnes)
-            for rayon, ingredients in courses.items():
-                st.write(f"**{rayon}**")
-                for nom, data in ingredients.items():
-                    qte = int(data['quantite']) if data['quantite'].is_integer() else round(data['quantite'], 2)
-                    st.checkbox(f"{nom} : {qte} {data['unite']}", key=f"shop_{nom}")
+            
+            if not courses:
+                st.success("🎉 Vous avez déjà tout ce qu'il faut dans votre frigo !")
+            else:
+                for rayon, ingredients in courses.items():
+                    st.write(f"**{rayon}**")
+                    for nom, data in ingredients.items():
+                        qte = int(data['quantite']) if data['quantite'].is_integer() else round(data['quantite'], 2)
+                        st.checkbox(f"{nom} : {qte} {data['unite']}", key=f"shop_{nom}")
+                
+                st.divider()
+                # --- LE NOUVEAU BOUTON D'ESTIMATION ---
+                if st.button("💰 Estimer le budget des courses", use_container_width=True):
+                    with st.spinner("L'IA calcule le montant de votre caddie..."):
+                        estimation = estimer_budget_ia(courses)
+                        st.info(f"**Budget estimé : {estimation}**")
     else:
         st.info("Utilisez le menu latéral pour commencer !")
 
 with onglet_frigo:
     st.subheader("🧊 Inventaire de vos réserves")
     
-    # --- AJOUTER / METTRE À JOUR ---
     with st.expander("➕ Ajouter ou modifier un article", expanded=True):
         res_tous_ing = supabase.table("ingredients").select("id, nom").execute()
         dict_ing = {i["nom"].capitalize(): i["id"] for i in res_tous_ing.data} if res_tous_ing.data else {}
@@ -164,7 +195,6 @@ with onglet_frigo:
 
     st.divider()
     
-    # --- LISTE DES STOCKS AVEC SUPPRESSION ---
     stocks = get_stock_frigo_complet()
     if stocks:
         for item in stocks:
@@ -172,7 +202,6 @@ with onglet_frigo:
             id_ing = item["ingredient_id"]
             qte_item = item["quantite"]
             
-            # Une ligne par ingrédient avec un bouton supprimer
             col_n, col_q, col_b = st.columns([3, 1, 1])
             col_n.write(f"**{nom_item}**")
             col_q.write(f"{qte_item}")
