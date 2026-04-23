@@ -158,7 +158,7 @@ with onglet_frigo:
         nom_sel = c1.selectbox("Ingrédient", [""] + sorted(list(dict_ing.keys())))
         qte_sel = c2.number_input("Quantité", min_value=0.0, value=1.0)
         if c3.button("Enregistrer", use_container_width=True) and nom_sel:
-            supabase.table("frigo").upsert({"ingredient_id": dict_ing[nom_sel], "quantite": qte_sel}).execute()
+            supabase.table("frigo").upsert({"ingredient_id": dict_ing[nom_sel], "quantite": qte_sel}, on_conflict="ingredient_id").execute()
             st.success(f"{nom_sel} mis à jour !")
             st.rerun()
 
