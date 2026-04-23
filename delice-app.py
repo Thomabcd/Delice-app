@@ -166,7 +166,7 @@ with tab_m:
                 st.write(f"**{r}**")
                 for n, d in ings.items():
                     q = int(d['quantite']) if d['quantite'].is_integer() else round(d['quantite'], 2)
-                    st.checkbox(f"{n} : {q} {d['unite']}", key=f"ch_{n}")
+                    st.checkbox(f"{n} : {q} {d['unite']}", key=f"ch_{r}_{n}")
             
             st.divider()
             txt_exp = "🛒 *Liste de Courses*\n\n" + "".join([f"📍 *{r}*\n" + "".join([f"☐ {n} : {d['quantite']} {d['unite']}\n" for n, d in ings.items()]) + "\n" for r, ings in crs.items()])
