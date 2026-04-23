@@ -77,19 +77,29 @@ def inventer_recette_ia(theme: str, options: List[str]) -> bool:
         except: return False
 
 def generer_menu(theme: str, nb_repas: int, options: List[str]) -> None:
-    st.session_state["theme_actuel"] = theme
-    # Recherche insensible à la casse pour éviter les bugs avec "Classique"
+    # 1. On cherche d'abord les recettes en base (sans toucher au titre affiché !)
     res = supabase.table("recettes").select("id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))").ilike("theme", theme).execute()
     recettes_dispo = res.data
     
+    # 2. S'il n'y a pas assez de recettes, on appelle l'IA
     if len(recettes_dispo) < nb_repas:
-        if inventer_recette_ia(theme, options):
+        succes = inventer_recette_ia(theme, options)
+        if succes:
+            # L'IA a réussi, on relance pour voir s'il en faut encore
             generer_menu(theme, nb_repas, options)
-        return
-
-    st.session_state["menu_actuel"] = random.sample(recettes_dispo, min(len(recettes_dispo), nb_repas))
-    save_menu_supabase(st.session_state["menu_actuel"])
-    st.rerun()
+            return
+        else:
+            # L'IA a échoué (limite atteinte ou timeout), on ne bloque pas tout !
+            st.warning("L'IA a besoin d'une pause. Affichage des recettes déjà disponibles pour ce thème.")
+            
+    # 3. Mise à jour de l'affichage UNIQUEMENT si on a des recettes du bon thème
+    if recettes_dispo:
+        st.session_state["theme_actuel"] = theme
+        st.session_state["menu_actuel"] = random.sample(recettes_dispo, min(len(recettes_dispo), nb_repas))
+        save_menu_supabase(st.session_state["menu_actuel"])
+        st.rerun()
+    else:
+        st.error(f"Génération impossible : Aucune recette '{theme}' en base et l'IA n'est pas disponible.")
 
 def remplacer_une_recette(index: int, options: List[str]):
     theme = st.session_state["theme_actuel"]
