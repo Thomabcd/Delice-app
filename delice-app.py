@@ -44,10 +44,21 @@ if "theme_actuel" not in st.session_state:
 # ==========================================
 # 3. LOGIQUE MÉTIER & IA
 # ==========================================
+def supprimer_recette(recette_id: str):
+    """Supprime une recette et ses liens de la base de données."""
+    supabase.table("recettes").delete().eq("id", recette_id).execute()
+    st.success("Recette supprimée avec succès !")
+    st.rerun()
+
 def inventer_recette_ia(theme: str, options: List[str]) -> bool:
     options_str = ", ".join(options) if options else "Aucune restriction"
-    prompt = f"Chef expert. Invente UNE recette '{theme}'. Options: {options_str}. Quantités pour 1 PERSONNE. Format JSON strict."
-    with st.spinner(f"🧠 L'IA invente une recette..."):
+    prompt = f"""
+    Tu es un chef cuisinier expert. Invente UNE NOUVELLE recette ORIGINALE du thème '{theme}'.
+    Elle doit être différente des recettes classiques de base.
+    Contraintes diététiques : {options_str}.
+    Quantités pour EXACTEMENT 1 PERSONNE. Réponds en JSON strict.
+    """
+    with st.spinner(f"🧠 L'IA invente une nouvelle recette {theme}..."):
         try:
             response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
             recette_ia = json.loads(response.text)
@@ -67,69 +78,48 @@ def inventer_recette_ia(theme: str, options: List[str]) -> bool:
 
 def generer_menu(theme: str, nb_repas: int, options: List[str]) -> None:
     st.session_state["theme_actuel"] = theme
-    res = supabase.table("recettes").select("id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))").eq("theme", theme).execute()
+    # Recherche insensible à la casse pour éviter les bugs avec "Classique"
+    res = supabase.table("recettes").select("id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))").ilike("theme", theme).execute()
     recettes_dispo = res.data
+    
     if len(recettes_dispo) < nb_repas:
-        if inventer_recette_ia(theme, options): generer_menu(theme, nb_repas, options)
+        if inventer_recette_ia(theme, options):
+            generer_menu(theme, nb_repas, options)
         return
+
     st.session_state["menu_actuel"] = random.sample(recettes_dispo, min(len(recettes_dispo), nb_repas))
     save_menu_supabase(st.session_state["menu_actuel"])
     st.rerun()
 
 def remplacer_une_recette(index: int, options: List[str]):
-    """Remplace une recette, et si la base est à sec, l'IA en invente une nouvelle !"""
     theme = st.session_state["theme_actuel"]
-    res = supabase.table("recettes").select("id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))").eq("theme", theme).execute()
-    
+    res = supabase.table("recettes").select("id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))").ilike("theme", theme).execute()
     ids_actuels = [r["id"] for r in st.session_state["menu_actuel"]]
     potentielles = [r for r in res.data if r["id"] not in ids_actuels]
     
     if potentielles:
-        # S'il y a des recettes en réserve, on pioche dedans
         st.session_state["menu_actuel"][index] = random.choice(potentielles)
         save_menu_supabase(st.session_state["menu_actuel"])
         st.rerun()
     else:
-        # S'il n'y en a plus, l'IA vole à la rescousse
         if inventer_recette_ia(theme, options):
-            # Une fois inventée, on relance la fonction pour l'afficher !
             remplacer_une_recette(index, options)
 
 def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
     res_stock = supabase.table("frigo").select("quantite, ingredients(nom)").execute()
     stock_frigo = {item["ingredients"]["nom"].capitalize(): float(item["quantite"]) for item in res_stock.data} if res_stock.data else {}
-    
     liste_courses: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for recette in menu:
         for lien in recette.get("recette_ingredients", []):
             nom_ing = lien.get("ingredients", {}).get("nom", "Inconnu").capitalize()
             rayon = lien.get("ingredients", {}).get("rayon", "Autre")
             besoin = float(lien.get("quantite", 0)) * nb_personnes
-            unite = lien.get("unite", "")
             qte_finale = besoin - stock_frigo.get(nom_ing, 0.0)
             if qte_finale > 0:
                 if rayon not in liste_courses: liste_courses[rayon] = {}
-                if nom_ing not in liste_courses[rayon]: liste_courses[rayon][nom_ing] = {"quantite": 0.0, "unite": unite}
+                if nom_ing not in liste_courses[rayon]: liste_courses[rayon][nom_ing] = {"quantite": 0.0, "unite": lien.get("unite", "")}
                 liste_courses[rayon][nom_ing]["quantite"] += qte_finale
     return liste_courses
-
-def estimer_budget_ia(courses: Dict[str, Dict[str, Dict[str, Any]]]) -> str:
-    if not courses: return "0€"
-    txt = "".join([f"- {d['quantite']} {d['unite']} {n}\n" for r, i in courses.items() for n, d in i.items()])
-    prompt = f"Expert budget courses France. Liste: {txt}. Donne juste une fourchette de prix (€)."
-    try: return model.generate_content(prompt).text.strip()
-    except: return "Indisponible"
-
-def formatter_courses_texte(courses: Dict[str, Dict[str, Dict[str, Any]]]) -> str:
-    if not courses: return "Rien à acheter ! 🎉"
-    t = "🛒 *Liste de Courses* 🍲\n\n"
-    for r, ings in courses.items():
-        t += f"📍 *{r}*\n"
-        for n, d in ings.items():
-            q = int(d['quantite']) if d['quantite'].is_integer() else round(d['quantite'], 2)
-            t += f"☐ {n} : {q} {d['unite']}\n"
-        t += "\n"
-    return t
 
 # ==========================================
 # 4. INTERFACE UTILISATEUR (GUI)
@@ -141,9 +131,13 @@ with st.sidebar:
     opt = st.multiselect("🥗 Options", ["Léger", "Hyperprotéiné", "Végétarien", "Économique"])
     st.divider()
     res_t = supabase.table("recettes").select("theme").execute()
-    themes = sorted(list(set([r["theme"] for r in res_t.data]))) if res_t.data else ["Classique"]
-    chx = st.selectbox("Thème", themes + ["+ Créer..."])
+    themes_bruts = list(set([r["theme"] for r in res_t.data])) if res_t.data else []
+    themes_fixes = ["Asiatique", "Orientale", "Italienne", "Classique"]
+    all_themes = sorted(list(set(themes_fixes + themes_bruts)))
+    
+    chx = st.selectbox("Thème", all_themes + ["+ Créer..."])
     th_f = st.text_input("Nom nouveau thème") if chx == "+ Créer..." else chx
+    
     if st.button("🚀 Générer la Semaine", use_container_width=True, type="primary"):
         generer_menu(th_f, nb_r, opt)
 
@@ -155,11 +149,16 @@ with tab_m:
         c_m, c_c = st.columns([1.2, 1])
         with c_m:
             st.subheader(f"Menu {st.session_state['theme_actuel']}")
+            # BOUTON POUR FORCER L'IA À EN AJOUTER UNE
+            if st.button("➕ Ajouter une nouvelle recette via l'IA"):
+                if inventer_recette_ia(st.session_state["theme_actuel"], opt):
+                    st.rerun()
+            
             for i, rec in enumerate(st.session_state["menu_actuel"]):
                 with st.expander(f"**{rec['nom']}**"):
                     st.write(rec['instructions'])
-                    if st.button(f"🔄 Remplacer cette recette", key=f"swap_{i}"):
-                       remplacer_une_recette(i, opt)
+                    if st.button(f"🔄 Remplacer", key=f"swap_{i}"):
+                        remplacer_une_recette(i, opt)
         with c_c:
             st.subheader("🛒 Courses")
             crs = calculer_courses(st.session_state["menu_actuel"], nb_p)
@@ -168,18 +167,15 @@ with tab_m:
                 for n, d in ings.items():
                     q = int(d['quantite']) if d['quantite'].is_integer() else round(d['quantite'], 2)
                     st.checkbox(f"{n} : {q} {d['unite']}", key=f"ch_{n}")
+            
             st.divider()
-            txt_exp = formatter_courses_texte(crs)
-            st.text_area("Copier la liste :", value=txt_exp, height=100)
-            lien_wa = f"https://wa.me/?text={urllib.parse.quote(txt_exp)}"
-            st.markdown(f'<a href="{lien_wa}" target="_blank" style="background:#25D366; color:white; padding:10px; border-radius:5px; text-decoration:none;">📱 WhatsApp</a>', unsafe_allow_html=True)
-            if st.button("💰 Estimer budget"):
-                st.info(f"Budget estimé : {estimer_budget_ia(crs)}")
-    else: st.info("Générez un menu depuis le menu latéral.")
+            txt_exp = "🛒 *Liste de Courses*\n\n" + "".join([f"📍 *{r}*\n" + "".join([f"☐ {n} : {d['quantite']} {d['unite']}\n" for n, d in ings.items()]) + "\n" for r, ings in crs.items()])
+            st.markdown(f'<a href="https://wa.me/?text={urllib.parse.quote(txt_exp)}" target="_blank" style="background:#25D366; color:white; padding:10px; border-radius:5px; text-decoration:none; display:block; text-align:center;">📱 Envoyer sur WhatsApp</a>', unsafe_allow_html=True)
+    else: st.info("Utilisez le menu latéral.")
 
 with tab_f:
-    st.subheader("🧊 Gestion des stocks")
-    with st.expander("➕ Ajouter au frigo"):
+    st.subheader("🧊 Stocks")
+    with st.expander("➕ Ajouter"):
         ri = supabase.table("ingredients").select("id, nom").execute()
         di = {i["nom"].capitalize(): i["id"] for i in ri.data} if ri.data else {}
         ca1, ca2, ca3 = st.columns([2, 1, 1])
@@ -188,7 +184,6 @@ with tab_f:
         if ca3.button("OK") and n_s:
             supabase.table("frigo").upsert({"ingredient_id": di[n_s], "quantite": q_s}, on_conflict="ingredient_id").execute()
             st.rerun()
-    st.divider()
     res_f = supabase.table("frigo").select("quantite, ingredient_id, ingredients(nom)").execute()
     for it in res_f.data:
         cn, cq, cb = st.columns([3, 1, 1])
@@ -199,11 +194,20 @@ with tab_f:
             st.rerun()
 
 with tab_l:
-    st.subheader("📚 Bibliothèque de toutes vos recettes")
-    search = st.text_input("🔍 Rechercher une recette (nom ou thème)")
-    all_r = supabase.table("recettes").select("nom, theme, instructions").execute()
+    st.subheader("📚 Livre de Recettes")
+    all_r = supabase.table("recettes").select("id, nom, theme, instructions").execute()
     if all_r.data:
-        filtered = [r for r in all_r.data if search.lower() in r['nom'].lower() or search.lower() in r['theme'].lower()]
-        for r in filtered:
-            with st.expander(f"**[{r['theme']}]** {r['nom']}"):
-                st.write(r['instructions'])
+        # Classement par thèmes
+        themes_presents = sorted(list(set([r['theme'] for r in all_r.data])))
+        for t in themes_presents:
+            st.markdown(f"### 📍 {t}")
+            recettes_du_theme = [r for r in all_r.data if r['theme'] == t]
+            for r in recettes_du_theme:
+                c1, c2 = st.columns([5, 1])
+                with c1:
+                    with st.expander(f"📖 {r['nom']}"):
+                        st.write(r['instructions'])
+                with c2:
+                    if st.button("🗑️", key=f"del_rec_{r['id']}"):
+                        supprimer_recette(r['id'])
+    else: st.info("Aucune recette en mémoire.")
