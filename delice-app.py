@@ -53,34 +53,28 @@ def supprimer_recette(recette_id: str):
 def inventer_recette_ia(theme: str, options: List[str]) -> bool:
     options_str = ", ".join(options) if options else "Aucune restriction"
     
-    # 1. On fouille dans la base pour dire à l'IA ce qu'on a déjà
     res_existantes = supabase.table("recettes").select("nom").ilike("theme", theme).execute()
     noms_existants = [r["nom"] for r in res_existantes.data] if res_existantes.data else []
-    
-    # 2. On crée une règle d'exclusion stricte
-    exclusion_str = f"NE PROPOSE SURTOUT PAS ces recettes (trouve autre chose) : {', '.join(noms_existants)}." if noms_existants else ""
-    
-    # 3. Un peu d'aléatoire pour le forcer à explorer
-    grain_folie = random.choice(["méconnue", "très originale", "créative", "authentique", "moderne"])
+    exclusion_str = f"NE PROPOSE SURTOUT PAS ces recettes : {', '.join(noms_existants)}." if noms_existants else ""
     
     prompt = f"""
-    Tu es un chef cuisinier expert. Invente UNE NOUVELLE recette {grain_folie} du thème '{theme}'.
+    Tu es un chef cuisinier expert. Invente UNE NOUVELLE recette originale du thème '{theme}'.
     {exclusion_str}
     Contraintes diététiques : {options_str}.
     Quantités pour EXACTEMENT 1 PERSONNE. 
-    Réponds STRICTEMENT avec un objet JSON valide.
+    RÈGLE ABSOLUE POUR LE JSON : La clé "quantite" DOIT ÊTRE UN NOMBRE (ex: 2 ou 0.5), JAMAIS DE TEXTE.
     Format attendu :
     {{
         "nom": "Nom de la recette", "instructions": "Les étapes brèves.",
         "ingredients": [
-            {{"nom": "Nom ingrédient", "rayon": "Légumes/Viandes/Épicerie/Frais", "quantite": 2.5, "unite": "pièce(s) ou g ou ml"}}
+            {{"nom": "Nom ingrédient", "rayon": "Légumes/Viandes/Épicerie/Frais", "quantite": 1.5, "unite": "pièce(s) ou g ou ml"}}
         ]
     }}
     """
-    with st.spinner(f"🧠 L'IA cherche une idée {grain_folie}..."):
+    with st.spinner(f"🧠 L'IA cherche une nouvelle idée..."):
         try:
-            # 4. On monte la "Température" à 0.9 pour forcer la créativité maximale
-            config = genai.GenerationConfig(response_mime_type="application/json", temperature=0.9)
+            # On redescend un tout petit peu la température à 0.7 (le bon équilibre entre créativité et rigueur)
+            config = genai.GenerationConfig(response_mime_type="application/json", temperature=0.7)
             response = model.generate_content(prompt, generation_config=config)
             
             recette_ia = json.loads(response.text)
@@ -91,18 +85,24 @@ def inventer_recette_ia(theme: str, options: List[str]) -> bool:
             recette_id = res_recette.data[0]["id"]
             
             for ing in recette_ia["ingredients"]:
-                supabase.table("ingredients").upsert({"nom": ing["nom"], "rayon": ing["rayon"]}, on_conflict="nom").execute()
-                res_ing = supabase.table("ingredients").select("id").eq("nom", ing["nom"]).execute()
+                # Nettoyage et sécurisation des données avant envoi en base
+                nom_ing = str(ing["nom"]).strip().capitalize()
+                qte_ing = float(ing["quantite"]) # FORCAGE EN NOMBRE (Si l'IA met du texte, c'est ici que ça plantera pour nous avertir)
+                rayon_ing = str(ing["rayon"]).strip()
+                unite_ing = str(ing["unite"]).strip()
+                
+                supabase.table("ingredients").upsert({"nom": nom_ing, "rayon": rayon_ing}, on_conflict="nom").execute()
+                res_ing = supabase.table("ingredients").select("id").eq("nom", nom_ing).execute()
                 supabase.table("recette_ingredients").insert({
                     "recette_id": recette_id, "ingredient_id": res_ing.data[0]["id"], 
-                    "quantite": ing["quantite"], "unite": ing["unite"]
+                    "quantite": qte_ing, "unite": unite_ing
                 }).execute()
                 
             st.success(f"✨ L'IA a créé une nouveauté : {recette_ia['nom']} !")
             return True
         except Exception as e: 
-            st.error("L'IA est en panne d'inspiration. Cliquez à nouveau !")
-            print(f"Erreur IA : {e}")
+            # MAINTENANT L'ERREUR S'AFFICHERA EN ROUGE SUR TON ÉCRAN
+            st.error(f"Erreur technique de l'IA : {e}")
             return False
 
 def generer_menu(theme: str, nb_repas: int, options: List[str]) -> None:
