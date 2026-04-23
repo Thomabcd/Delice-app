@@ -76,8 +76,8 @@ def generer_menu(theme: str, nb_repas: int, options: List[str]) -> None:
     save_menu_supabase(st.session_state["menu_actuel"])
     st.rerun()
 
-def remplacer_une_recette(index: int):
-    """Remplace une seule recette du menu par une autre du même thème."""
+def remplacer_une_recette(index: int, options: List[str]):
+    """Remplace une recette, et si la base est à sec, l'IA en invente une nouvelle !"""
     theme = st.session_state["theme_actuel"]
     res = supabase.table("recettes").select("id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))").eq("theme", theme).execute()
     
@@ -85,11 +85,15 @@ def remplacer_une_recette(index: int):
     potentielles = [r for r in res.data if r["id"] not in ids_actuels]
     
     if potentielles:
+        # S'il y a des recettes en réserve, on pioche dedans
         st.session_state["menu_actuel"][index] = random.choice(potentielles)
         save_menu_supabase(st.session_state["menu_actuel"])
         st.rerun()
     else:
-        st.warning("Aucune autre recette de ce thème en base. Utilisez l'IA pour en créer une nouvelle !")
+        # S'il n'y en a plus, l'IA vole à la rescousse
+        if inventer_recette_ia(theme, options):
+            # Une fois inventée, on relance la fonction pour l'afficher !
+            remplacer_une_recette(index, options)
 
 def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
     res_stock = supabase.table("frigo").select("quantite, ingredients(nom)").execute()
@@ -155,7 +159,7 @@ with tab_m:
                 with st.expander(f"**{rec['nom']}**"):
                     st.write(rec['instructions'])
                     if st.button(f"🔄 Remplacer cette recette", key=f"swap_{i}"):
-                        remplacer_une_recette(i)
+                    remplacer_une_recette(i, opt)
         with c_c:
             st.subheader("🛒 Courses")
             crs = calculer_courses(st.session_state["menu_actuel"], nb_p)
