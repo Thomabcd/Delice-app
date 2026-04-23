@@ -1,3 +1,4 @@
+import time
 import streamlit as st
 import random
 import json
@@ -62,48 +63,64 @@ def inventer_recette_ia(theme: str, options: List[str]) -> bool:
     {exclusion_str}
     Contraintes diététiques : {options_str}.
     Quantités pour EXACTEMENT 1 PERSONNE. 
-    RÈGLE ABSOLUE POUR LE JSON : La clé "quantite" DOIT ÊTRE UN NOMBRE (ex: 2 ou 0.5), JAMAIS DE TEXTE.
+    RÈGLE ABSOLUE : La clé "quantite" DOIT ÊTRE UN NOMBRE (ex: 2 ou 0.5), JAMAIS DE TEXTE.
     Format attendu :
     {{
         "nom": "Nom de la recette", "instructions": "Les étapes brèves.",
         "ingredients": [
-            {{"nom": "Nom ingrédient", "rayon": "Légumes/Viandes/Épicerie/Frais", "quantite": 1.5, "unite": "pièce(s) ou g ou ml"}}
+            {{"nom": "Ingrédient", "rayon": "Rayon", "quantite": 1.5, "unite": "pièce(s)"}}
         ]
     }}
     """
-    with st.spinner(f"🧠 L'IA cherche une nouvelle idée..."):
-        try:
-            # On redescend un tout petit peu la température à 0.7 (le bon équilibre entre créativité et rigueur)
-            config = genai.GenerationConfig(response_mime_type="application/json", temperature=0.7)
-            response = model.generate_content(prompt, generation_config=config)
-            
-            recette_ia = json.loads(response.text)
-            
-            res_recette = supabase.table("recettes").insert({
-                "nom": recette_ia["nom"], "theme": theme, "instructions": recette_ia["instructions"]
-            }).execute()
-            recette_id = res_recette.data[0]["id"]
-            
-            for ing in recette_ia["ingredients"]:
-                # Nettoyage et sécurisation des données avant envoi en base
-                nom_ing = str(ing["nom"]).strip().capitalize()
-                qte_ing = float(ing["quantite"]) # FORCAGE EN NOMBRE (Si l'IA met du texte, c'est ici que ça plantera pour nous avertir)
-                rayon_ing = str(ing["rayon"]).strip()
-                unite_ing = str(ing["unite"]).strip()
+    
+    # On autorise l'application à essayer 3 fois avant d'abandonner
+    max_tentatives = 3
+    
+    for tentative in range(max_tentatives):
+        with st.spinner(f"🧠 L'IA cherche une nouvelle idée (Tentative {tentative + 1}/{max_tentatives})..."):
+            try:
+                config = genai.GenerationConfig(response_mime_type="application/json", temperature=0.7)
+                response = model.generate_content(prompt, generation_config=config)
                 
-                supabase.table("ingredients").upsert({"nom": nom_ing, "rayon": rayon_ing}, on_conflict="nom").execute()
-                res_ing = supabase.table("ingredients").select("id").eq("nom", nom_ing).execute()
-                supabase.table("recette_ingredients").insert({
-                    "recette_id": recette_id, "ingredient_id": res_ing.data[0]["id"], 
-                    "quantite": qte_ing, "unite": unite_ing
+                recette_ia = json.loads(response.text)
+                
+                res_recette = supabase.table("recettes").insert({
+                    "nom": recette_ia["nom"], "theme": theme, "instructions": recette_ia["instructions"]
                 }).execute()
+                recette_id = res_recette.data[0]["id"]
                 
-            st.success(f"✨ L'IA a créé une nouveauté : {recette_ia['nom']} !")
-            return True
-        except Exception as e: 
-            # MAINTENANT L'ERREUR S'AFFICHERA EN ROUGE SUR TON ÉCRAN
-            st.error(f"Erreur technique de l'IA : {e}")
-            return False
+                for ing in recette_ia["ingredients"]:
+                    nom_ing = str(ing["nom"]).strip().capitalize()
+                    qte_ing = float(ing["quantite"])
+                    rayon_ing = str(ing["rayon"]).strip()
+                    unite_ing = str(ing["unite"]).strip()
+                    
+                    supabase.table("ingredients").upsert({"nom": nom_ing, "rayon": rayon_ing}, on_conflict="nom").execute()
+                    res_ing = supabase.table("ingredients").select("id").eq("nom", nom_ing).execute()
+                    supabase.table("recette_ingredients").insert({
+                        "recette_id": recette_id, "ingredient_id": res_ing.data[0]["id"], 
+                        "quantite": qte_ing, "unite": unite_ing
+                    }).execute()
+                    
+                st.success(f"✨ L'IA a créé une nouveauté : {recette_ia['nom']} !")
+                return True
+                
+            except Exception as e:
+                erreur_str = str(e)
+                # Si l'erreur est liée au quota (429), on patiente intelligemment
+                if "429" in erreur_str or "quota" in erreur_str.lower():
+                    if tentative < max_tentatives - 1:
+                        # On augmente le temps de pause : 20 secondes de sécurité
+                        temps_attente = 20 
+                        st.warning(f"Google freine la cadence. Pause de {temps_attente} secondes avant la tentative {tentative + 2}...")
+                        time.sleep(temps_attente) 
+                        continue 
+                    else:
+                        st.error("L'IA est trop sollicitée pour le moment. Laissez-lui 1 ou 2 minutes de repos ! ☕")
+                        return False
+                else:
+                    st.error(f"Erreur technique inattendue : {erreur_str}")
+                    return False
 
 def generer_menu(theme: str, nb_repas: int, options: List[str]) -> None:
     # 1. On cherche d'abord les recettes en base (sans toucher au titre affiché !)
