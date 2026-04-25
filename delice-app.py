@@ -163,7 +163,8 @@ with tab_m:
                 for n, d in ings.items():
                     q = int(d['quantite']) if d['quantite'].is_integer() else round(d['quantite'], 2)
                     st.checkbox(f"{n} : {q} {d['unite']}", key=f"ch_{r}_{n}")
-    else: st.info("Votre menu est vide. Utilisez la barre latérale ou le livre de recettes !")
+    else: 
+        st.info("Votre menu est vide. Utilisez la barre latérale ou le livre de recettes !")
 
 with tab_f:
     st.subheader("🧊 Stocks")
