@@ -155,7 +155,7 @@ with tab_m:
                             st.session_state["menu_actuel"][i] = random.choice(potentielles)
                             save_menu_supabase(st.session_state["menu_actuel"])
                             st.rerun()
-        with c_c:
+        with col_c:
             st.subheader("🛒 Courses")
             crs = calculer_courses(st.session_state["menu_actuel"], nb_p)
             for r, ings in crs.items():
