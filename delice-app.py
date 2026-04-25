@@ -1,8 +1,8 @@
-import time
 import streamlit as st
 import random
 import json
 import urllib.parse
+import time
 from typing import List, Dict, Any
 from supabase import create_client, Client
 import google.generativeai as genai
@@ -46,14 +46,12 @@ if "theme_actuel" not in st.session_state:
 # 3. LOGIQUE MÉTIER & IA
 # ==========================================
 def supprimer_recette(recette_id: str):
-    """Supprime une recette et ses liens de la base de données."""
     supabase.table("recettes").delete().eq("id", recette_id).execute()
     st.success("Recette supprimée avec succès !")
     st.rerun()
 
 def inventer_recette_ia(theme: str, options: List[str]) -> bool:
     options_str = ", ".join(options) if options else "Aucune restriction"
-    
     res_existantes = supabase.table("recettes").select("nom").ilike("theme", theme).execute()
     noms_existants = [r["nom"] for r in res_existantes.data] if res_existantes.data else []
     exclusion_str = f"NE PROPOSE SURTOUT PAS ces recettes : {', '.join(noms_existants)}." if noms_existants else ""
@@ -64,24 +62,19 @@ def inventer_recette_ia(theme: str, options: List[str]) -> bool:
     Contraintes diététiques : {options_str}.
     Quantités pour EXACTEMENT 1 PERSONNE. 
     RÈGLE ABSOLUE : La clé "quantite" DOIT ÊTRE UN NOMBRE (ex: 2 ou 0.5), JAMAIS DE TEXTE.
-    Format attendu :
+    Format attendu JSON :
     {{
-        "nom": "Nom de la recette", "instructions": "Les étapes brèves.",
-        "ingredients": [
-            {{"nom": "Ingrédient", "rayon": "Rayon", "quantite": 1.5, "unite": "pièce(s)"}}
-        ]
+        "nom": "Nom", "instructions": "Les étapes.",
+        "ingredients": [{{"nom": "Ingrédient", "rayon": "Rayon", "quantite": 1.5, "unite": "pièce(s)"}}]
     }}
     """
     
-    # On autorise l'application à essayer 3 fois avant d'abandonner
     max_tentatives = 3
-    
     for tentative in range(max_tentatives):
         with st.spinner(f"🧠 L'IA cherche une nouvelle idée (Tentative {tentative + 1}/{max_tentatives})..."):
             try:
                 config = genai.GenerationConfig(response_mime_type="application/json", temperature=0.7)
                 response = model.generate_content(prompt, generation_config=config)
-                
                 recette_ia = json.loads(response.text)
                 
                 res_recette = supabase.table("recettes").insert({
@@ -107,45 +100,37 @@ def inventer_recette_ia(theme: str, options: List[str]) -> bool:
                 
             except Exception as e:
                 erreur_str = str(e)
-                # Si l'erreur est liée au quota (429), on patiente intelligemment
                 if "429" in erreur_str or "quota" in erreur_str.lower():
                     if tentative < max_tentatives - 1:
-                        # On augmente le temps de pause : 20 secondes de sécurité
-                        temps_attente = 20 
-                        st.warning(f"Google freine la cadence. Pause de {temps_attente} secondes avant la tentative {tentative + 2}...")
-                        time.sleep(temps_attente) 
+                        st.warning("Google freine la cadence. Pause de 20 secondes de sécurité...")
+                        time.sleep(20) 
                         continue 
                     else:
                         st.error("L'IA est trop sollicitée pour le moment. Laissez-lui 1 ou 2 minutes de repos ! ☕")
                         return False
                 else:
-                    st.error(f"Erreur technique inattendue : {erreur_str}")
+                    st.error(f"Erreur technique : {erreur_str}")
                     return False
 
 def generer_menu(theme: str, nb_repas: int, options: List[str]) -> None:
-    # 1. On cherche d'abord les recettes en base (sans toucher au titre affiché !)
     res = supabase.table("recettes").select("id, nom, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))").ilike("theme", theme).execute()
     recettes_dispo = res.data
     
-    # 2. S'il n'y a pas assez de recettes, on appelle l'IA
     if len(recettes_dispo) < nb_repas:
         succes = inventer_recette_ia(theme, options)
         if succes:
-            # L'IA a réussi, on relance pour voir s'il en faut encore
             generer_menu(theme, nb_repas, options)
             return
         else:
-            # L'IA a échoué (limite atteinte ou timeout), on ne bloque pas tout !
-            st.warning("L'IA a besoin d'une pause. Affichage des recettes déjà disponibles pour ce thème.")
+            st.warning("Affichage des recettes déjà disponibles pour ce thème.")
             
-    # 3. Mise à jour de l'affichage UNIQUEMENT si on a des recettes du bon thème
     if recettes_dispo:
         st.session_state["theme_actuel"] = theme
         st.session_state["menu_actuel"] = random.sample(recettes_dispo, min(len(recettes_dispo), nb_repas))
         save_menu_supabase(st.session_state["menu_actuel"])
         st.rerun()
     else:
-        st.error(f"Génération impossible : Aucune recette '{theme}' en base et l'IA n'est pas disponible.")
+        st.error(f"Génération impossible : Aucune recette '{theme}' en base.")
 
 def remplacer_une_recette(index: int, options: List[str]):
     theme = st.session_state["theme_actuel"]
@@ -177,6 +162,19 @@ def calculer_courses(menu: List[Dict[str, Any]], nb_personnes: int) -> Dict[str,
                 liste_courses[rayon][nom_ing]["quantite"] += qte_finale
     return liste_courses
 
+def afficher_details_recette(recette):
+    """Fonction utilitaire pour afficher proprement une recette (Ingrédients + Préparation)"""
+    st.markdown("**🛒 Ingrédients (pour 1 personne) :**")
+    for lien in recette.get("recette_ingredients", []):
+        nom_ing = lien.get("ingredients", {}).get("nom", "Inconnu").capitalize()
+        qte = lien.get("quantite", 0)
+        qte_propre = int(qte) if isinstance(qte, float) and qte.is_integer() else qte
+        unite = lien.get("unite", "")
+        st.markdown(f"- {qte_propre} {unite} {nom_ing}")
+    
+    st.markdown("**👨‍🍳 Préparation :**")
+    st.write(recette.get('instructions', "Aucune instruction."))
+
 # ==========================================
 # 4. INTERFACE UTILISATEUR (GUI)
 # ==========================================
@@ -205,14 +203,16 @@ with tab_m:
         c_m, c_c = st.columns([1.2, 1])
         with c_m:
             st.subheader(f"Menu {st.session_state['theme_actuel']}")
-            # BOUTON POUR FORCER L'IA À EN AJOUTER UNE
             if st.button("➕ Ajouter une nouvelle recette via l'IA"):
                 if inventer_recette_ia(st.session_state["theme_actuel"], opt):
                     st.rerun()
             
             for i, rec in enumerate(st.session_state["menu_actuel"]):
                 with st.expander(f"**{rec['nom']}**"):
-                    st.write(rec['instructions'])
+                    # On utilise la nouvelle fonction d'affichage
+                    afficher_details_recette(rec)
+                    
+                    st.divider()
                     if st.button(f"🔄 Remplacer", key=f"swap_{i}"):
                         remplacer_une_recette(i, opt)
         with c_c:
@@ -222,12 +222,13 @@ with tab_m:
                 st.write(f"**{r}**")
                 for n, d in ings.items():
                     q = int(d['quantite']) if d['quantite'].is_integer() else round(d['quantite'], 2)
+                    # La correction anti-doublon est bien là :
                     st.checkbox(f"{n} : {q} {d['unite']}", key=f"ch_{r}_{n}")
             
             st.divider()
             txt_exp = "🛒 *Liste de Courses*\n\n" + "".join([f"📍 *{r}*\n" + "".join([f"☐ {n} : {d['quantite']} {d['unite']}\n" for n, d in ings.items()]) + "\n" for r, ings in crs.items()])
             st.markdown(f'<a href="https://wa.me/?text={urllib.parse.quote(txt_exp)}" target="_blank" style="background:#25D366; color:white; padding:10px; border-radius:5px; text-decoration:none; display:block; text-align:center;">📱 Envoyer sur WhatsApp</a>', unsafe_allow_html=True)
-    else: st.info("Utilisez le menu latéral.")
+    else: st.info("Utilisez le menu latéral pour commencer.")
 
 with tab_f:
     st.subheader("🧊 Stocks")
@@ -251,9 +252,9 @@ with tab_f:
 
 with tab_l:
     st.subheader("📚 Livre de Recettes")
-    all_r = supabase.table("recettes").select("id, nom, theme, instructions").execute()
+    # On a ajouté la demande des ingrédients dans la requête Supabase !
+    all_r = supabase.table("recettes").select("id, nom, theme, instructions, recette_ingredients(quantite, unite, ingredients(nom, rayon))").execute()
     if all_r.data:
-        # Classement par thèmes
         themes_presents = sorted(list(set([r['theme'] for r in all_r.data])))
         for t in themes_presents:
             st.markdown(f"### 📍 {t}")
@@ -262,7 +263,8 @@ with tab_l:
                 c1, c2 = st.columns([5, 1])
                 with c1:
                     with st.expander(f"📖 {r['nom']}"):
-                        st.write(r['instructions'])
+                        # On réutilise la même fonction pour le livre
+                        afficher_details_recette(r)
                 with c2:
                     if st.button("🗑️", key=f"del_rec_{r['id']}"):
                         supprimer_recette(r['id'])
